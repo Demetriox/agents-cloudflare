@@ -1,0 +1,57 @@
+name = "embeddings-tutorial"
+main = "src/index.ts"
+compatibility_date = "2025-08-21"
+
+# AI binding (Workers AI) - mantener para compatibilidad si es necesario
+[ai]
+binding = "AI"
+
+# Variables de entorno globales para Azure OpenAI
+[vars]
+AZURE_OPENAI_ENDPOINT = "https://unisound-agents.openai.azure.com/"
+AZURE_OPENAI_API_VERSION = "2024-10-21"
+AZURE_OPENAI_DEPLOYMENT_NAME = "gpt-4o"
+AZURE_OPENAI_EMBEDDING_DEPLOYMENT = "gpt-4o"
+
+# Vectorize binding - IMPORTANTE: dimensiones para embeddings de Azure OpenAI
+[[vectorize]]
+binding = "VECTORIZE"
+index_name = "your-vectorize-index-name"
+dimensions = 1536                        # Para text-embedding-ada-002 de Azure OpenAI
+metric = "cosine"
+
+# R2 bucket binding para almacenamiento de documentos
+[[r2_buckets]]
+binding = "R2_BUCKET"
+bucket_name = "rag-ddex-test"
+preview_bucket_name = "rag-ddex-test-preview" # Para desarrollo
+
+# Durable Object binding para el Agent
+[[durable_objects.bindings]]
+name = "MyAgent"
+class_name = "MyAgent"
+
+# Migration para Durable Objects
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["MyAgent"]
+
+[observability]
+enabled = true
+
+# Smart Placement para mejor rendimiento
+[placement]
+mode = "smart"
+
+# Variables específicas por entorno
+[env.production.vars]
+ENVIRONMENT = "production"
+AZURE_OPENAI_DEPLOYMENT_NAME = "gpt-4o" # Modelo de producción
+
+# Configuración de límites para producción
+[env.production.limits]
+cpu_ms = 30000
+
+[env.development.vars]
+ENVIRONMENT = "development"
+AZURE_OPENAI_DEPLOYMENT_NAME = "gpt-35-turbo" # Modelo más barato para dev
