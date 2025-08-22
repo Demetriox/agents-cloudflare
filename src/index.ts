@@ -5,6 +5,10 @@ export interface Env {
 	AI: Ai;
 	// Binding para el Durable Object del Agent (usando el nombre de tu toml)
 	MyAgent: DurableObjectNamespace;
+	AZURE_OPENAI_ENDPOINT: string;
+	AZURE_OPENAI_API_VERSION: string;
+	AZURE_OPENAI_DEPLOYMENT_NAME: string;
+	AZURE_OPENAI_API_KEY?: string; // This should match your secret name
 }
 
 // Updated interface to match Cloudflare AI's actual response type
@@ -14,25 +18,20 @@ interface EmbeddingResponse {
 	pooling?: "mean" | "cls";
 }
 
-interface ChatResponse {
-	response?: string;
-	[key: string]: any;
+// Proper Azure OpenAI response interface
+interface AzureOpenAIResponse {
+	choices: {
+		message: {
+			content: string;
+		};
+		finish_reason: string;
+	}[];
+	usage?: {
+		prompt_tokens: number;
+		completion_tokens: number;
+		total_tokens: number;
+	};
 }
-
-// Definición del Agent que decide si usar RAG o no
-
-
-
-class MyAgents extends Agent {
-
-
-
-}
-
-
-var agent = MyAgents;
-// Ejemplo de uso del
-
 
 class RAGAgent {
 	private env: Env;
@@ -42,7 +41,6 @@ class RAGAgent {
 	}
 
 	async shouldUseRAG(question: string): Promise<boolean> {
-
 		// Aquí defines la lógica para determinar si usar RAG
 		// Ejemplos de casos donde usar RAG:
 		const ragKeywords = [
@@ -85,24 +83,42 @@ Responde solo con "RAG" si necesita buscar en documentos específicos, o "GENERA
 
 Respuesta:`;
 
-			const decisionResponse = await this.env.AI.run(
-				"@cf/meta/llama-3.1-8b-instruct",
+			const response = await fetch(
+				`${this.env.AZURE_OPENAI_ENDPOINT}/openai/deployments/${this.env.AZURE_OPENAI_DEPLOYMENT_NAME}/chat/completions?api-version=${this.env.AZURE_OPENAI_API_VERSION}`,
 				{
-					messages: [
-						{
-							role: "system",
-							content: "Eres un clasificador que determina si una pregunta requiere RAG o conocimiento general."
-						},
-						{
-							role: "user",
-							content: decisionPrompt
-						}
-					]
+					method: "POST",
+					headers: {
+						"Content-Type": "application/json",
+						"api-key": this.env.AZURE_OPENAI_API_KEY || "", // Fixed: Direct access to env variable
+					},
+					body: JSON.stringify({
+						messages: [
+							{
+								role: "system",
+								content: "Decide si la pregunta requiere RAG (documentos) o GENERAL (conocimiento común). Responde solo 'RAG' o 'GENERAL'."
+							},
+							{
+								role: "user",
+								content: `Pregunta: "${question}"`
+							}
+						],
+						temperature: 0.7,
+						max_tokens: 10,
+						top_p: 0.9
+					}),
 				}
-			) as ChatResponse;
+			);
 
-			return (decisionResponse.response || "").toLowerCase().includes("rag");
+			if (!response.ok) {
+				throw new Error(`Azure OpenAI API error: ${response.status} - ${await response.text()}`);
+			}
+
+			const decisionResponse: AzureOpenAIResponse = await response.json(); // Fixed: Parse JSON first
+			const content = decisionResponse.choices?.[0]?.message?.content || "";
+
+			return content.toLowerCase().includes("rag");
 		} catch (error) {
+			console.error("Error in shouldUseRAG:", error);
 			// En caso de error, defaultear a usar RAG si la pregunta es específica
 			return questionLower.length > 20; // Preguntas más largas tienden a ser más específicas
 		}
@@ -134,7 +150,8 @@ Respuesta:`;
 				.join('\n\n');
 
 			// Step 4: Generate response using LLM with context
-			let answer;
+			let answer = "No pude encontrar información relevante en la base de conocimientos.";
+
 			if (context.length > 0) {
 				const prompt = `Context information:
 ${context}
@@ -145,25 +162,38 @@ Please provide a helpful and accurate answer based on the context information ab
 
 Answer:`;
 
-				const chatResponse = await this.env.AI.run(
-					"@cf/meta/llama-3.1-8b-instruct",
+				const response = await fetch(
+					`${this.env.AZURE_OPENAI_ENDPOINT}/openai/deployments/${this.env.AZURE_OPENAI_DEPLOYMENT_NAME}/chat/completions?api-version=${this.env.AZURE_OPENAI_API_VERSION}`,
 					{
-						messages: [
-							{
-								role: "system",
-								content: "You are a helpful assistant that answers questions based on the provided context. Be accurate and cite the context when possible."
-							},
-							{
-								role: "user",
-								content: prompt
-							}
-						]
+						method: "POST",
+						headers: {
+							"Content-Type": "application/json",
+							"api-key": this.env.AZURE_OPENAI_API_KEY || "", // Fixed: Direct access
+						},
+						body: JSON.stringify({
+							messages: [
+								{
+									role: "system",
+									content: "Eres un asistente útil y creativo. Responde en español de forma clara y detallada basándote en el contexto proporcionado."
+								},
+								{
+									role: "user",
+									content: prompt // Fixed: Use the proper prompt with context
+								}
+							],
+							temperature: 0.7,
+							max_tokens: 300,
+							top_p: 0.9
+						}),
 					}
-				) as ChatResponse;
+				);
 
-				answer = chatResponse.response || "I couldn't generate a response.";
-			} else {
-				answer = "I don't have enough relevant information in my knowledge base to answer your question. Please try rephrasing your question or add more relevant documents to the knowledge base.";
+				if (!response.ok) {
+					throw new Error(`Azure OpenAI API error: ${response.status} - ${await response.text()}`);
+				}
+
+				const chatResponse: AzureOpenAIResponse = await response.json(); // Fixed: Parse JSON first
+				answer = chatResponse.choices?.[0]?.message?.content || "No pude generar una respuesta.";
 			}
 
 			return {
@@ -182,37 +212,56 @@ Answer:`;
 			};
 
 		} catch (error) {
+			console.error("Error in processWithRAG:", error);
 			throw new Error(`RAG processing failed: ${error instanceof Error ? error.message : "Unknown error"}`);
 		}
 	}
 
 	async processGeneral(question: string): Promise<any> {
 		try {
-			const chatResponse = await this.env.AI.run(
-				"@cf/meta/llama-3.1-8b-instruct",
+			const response = await fetch(
+				`${this.env.AZURE_OPENAI_ENDPOINT}/openai/deployments/${this.env.AZURE_OPENAI_DEPLOYMENT_NAME}/chat/completions?api-version=${this.env.AZURE_OPENAI_API_VERSION}`,
 				{
-					messages: [
-						{
-							role: "system",
-							content: "You are a helpful assistant. Provide clear, accurate, and helpful responses to user questions."
-						},
-						{
-							role: "user",
-							content: question
-						}
-					]
+					method: "POST",
+					headers: {
+						"Content-Type": "application/json",
+						"api-key": this.env.AZURE_OPENAI_API_KEY || "", // Fixed: Direct access
+					},
+					body: JSON.stringify({
+						messages: [
+							{
+								role: "system",
+								content: "Eres un asistente útil y creativo. Responde en español de forma clara y detallada." // Fixed: Proper system message
+							},
+							{
+								role: "user",
+								content: question // Fixed: Use the actual question
+							}
+						],
+						temperature: 0.7,
+						max_tokens: 300, // Fixed: Increased token limit
+						top_p: 0.9
+					}),
 				}
-			) as ChatResponse;
+			);
+
+			if (!response.ok) {
+				throw new Error(`Azure OpenAI API error: ${response.status} - ${await response.text()}`);
+			}
+
+			const chatResponse: AzureOpenAIResponse = await response.json(); // Fixed: Parse JSON first
+			const answer = chatResponse.choices?.[0]?.message?.content || "No pude generar una respuesta.";
 
 			return {
 				question,
-				answer: chatResponse.response || "I couldn't generate a response.",
+				answer,
 				usedRAG: false,
 				sources: [],
 				context_used: false
 			};
 
 		} catch (error) {
+			console.error("Error in processGeneral:", error);
 			throw new Error(`General processing failed: ${error instanceof Error ? error.message : "Unknown error"}`);
 		}
 	}
@@ -295,6 +344,7 @@ export default {
 				}, { headers: corsHeaders });
 
 			} catch (error) {
+				console.error("Chat endpoint error:", error);
 				return Response.json({
 					error: "Failed to process chat request",
 					details: error instanceof Error ? error.message : "Unknown error"
